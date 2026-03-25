@@ -1,18 +1,42 @@
 #!/usr/bin/env bash
-# Null · rmx (basic trash)
-# simple file removal to trash
+# Null · rmx (crypto-shredding)
+# encrypt on delete, key cleanup on recover/empty
 
 set -euo pipefail
 
 _dir="$HOME/.local/share/Trash"
+_crypto=true
 _lock_file="${XDG_RUNTIME_DIR:-/tmp}/trash-lock-$(id -u).flock"
+
+# when /dev/shm is usable, keys live in RAM (reboot => keys gone)
+if [[ -d /dev/shm && -w /dev/shm ]]; then
+  _keys="/dev/shm/.trash-keys-$(id -u)"
+else
+  _crypto=false
+fi
 
 # --- dependencies ---
 command -v flock >/dev/null 2>&1 || { echo "  error: flock not found" >&2; exit 1; }
+if $_crypto; then
+  command -v base64 >/dev/null 2>&1 || { echo "  error: base64 not found" >&2; exit 1; }
+  command -v openssl >/dev/null 2>&1 || { echo "  error: openssl not found" >&2; exit 1; }
+fi
 
 # --- init ---
 _init() {
   mkdir -p "$_dir"
+  if $_crypto; then
+    # keys file unwritable? degrade to plain mv
+    if ! { touch "$_keys" && chmod 600 "$_keys"; } 2>/dev/null; then
+      _crypto=false
+    fi
+  fi
+}
+
+# --- encoding ---
+# base64 encode filename - safe for any character in key storage
+_b64enc() {
+  printf '%s' "$1" | base64 | tr -d '\n'
 }
 
 # --- locking ---
@@ -26,21 +50,41 @@ _unlock_trash() {
   exec 9>&- || true
 }
 
-# --- move single item to trash ---
+# --- encrypt and remove single item ---
 _trash_one() {
-  local f="$1" base name n
+  local f="$1" base name n key enc_name
 
   _lock_trash
   base="$(basename -- "$f")"
   name="$base"
   n=1
-
   # collision avoidance: file.txt → file.txt.1 → file.txt.2
-  while [[ -e "$_dir/$name" ]]; do
+  while [[ -e "$_dir/$name.enc" || -e "$_dir/$name" ]]; do
     name="${base}.${n}"
     ((n++))
   done
 
+  if $_crypto; then
+    key=$(openssl rand -hex 32 2>/dev/null) || key=""
+    if [[ -n "$key" ]]; then
+      # file: encrypt directly
+      if openssl enc -aes-256-cbc -salt -pbkdf2 -pass "fd:3" -in "$f" -out "$_dir/$name.enc" 3<<< "$key" 2>/dev/null; then
+        enc_name="$(_b64enc "$name")"
+        printf 'v1\t%s\t%s\t%s\n' "$enc_name" "$key" "f" >> "$_keys"
+        # symlink: rm only (shred would destroy target)
+        if [[ -L "$f" ]]; then
+          rm -f -- "$f" || { _unlock_trash; return 1; }
+        else
+          shred -u -- "$f" 2>/dev/null || rm -f -- "$f" || { _unlock_trash; return 1; }
+        fi
+        _unlock_trash
+        return 0
+      fi
+      rm -f -- "$_dir/$name.enc" 2>/dev/null || true    # orphan cleanup
+    fi
+  fi
+
+  # fallback: no crypto available, plain move
   if mv -- "$f" "$_dir/$name"; then
     _unlock_trash
     return 0
