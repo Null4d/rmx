@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Null · rmx (basic trash)
+# simple file removal to trash
+
+set -euo pipefail
+
+_dir="$HOME/.local/share/Trash"
+_lock_file="${XDG_RUNTIME_DIR:-/tmp}/trash-lock-$(id -u).flock"
+
+# --- dependencies ---
+command -v flock >/dev/null 2>&1 || { echo "  error: flock not found" >&2; exit 1; }
+
+# --- init ---
+_init() {
+  mkdir -p "$_dir"
+}
+
+# --- locking ---
+_lock_trash() {
+  exec 9>>"$_lock_file"
+  flock -x 9
+}
+
+_unlock_trash() {
+  flock -u 9 2>/dev/null || true
+  exec 9>&- || true
+}
+
+# --- move single item to trash ---
+_trash_one() {
+  local f="$1" base name n
+
+  _lock_trash
+  base="$(basename -- "$f")"
+  name="$base"
+  n=1
+
+  # collision avoidance: file.txt → file.txt.1 → file.txt.2
+  while [[ -e "$_dir/$name" ]]; do
+    name="${base}.${n}"
+    ((n++))
+  done
+
+  if mv -- "$f" "$_dir/$name"; then
+    _unlock_trash
+    return 0
+  fi
+
+  _unlock_trash
+  return 1
+}
+
+# --- move multiple files ---
+_trash() {
+  [[ $# -eq 0 ]] && { echo "  usage: rmx <file ...>" >&2; return 1; }
+  _init
+
+  local rc=0
+  for f in "$@"; do
+    [[ ! -e "$f" && ! -L "$f" ]] && { echo "  error: '$f' not found" >&2; rc=1; continue; }
+    _trash_one "$f" || { echo "  error: failed to remove '$f'" >&2; rc=1; }
+  done
+  return $rc
+}
+
+# --- dispatch ---
+_trash "$@"
