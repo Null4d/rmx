@@ -14,6 +14,8 @@ cp rmx ~/.local/bin/
 
 ```
 rmx <file ...>              # encrypt and trash
+rmx recover <filename>      # decrypt and restore to CWD
+rmx list                    # show recoverable files
 ```
 
 ## How it works

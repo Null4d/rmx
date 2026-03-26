@@ -39,6 +39,22 @@ _b64enc() {
   printf '%s' "$1" | base64 | tr -d '\n'
 }
 
+# --- key management ---
+# remove a key entry after successful recover (atomic via tmp+mv)
+_drop_key_entry() {
+  local enc_name="$1" tmp
+  tmp="$(mktemp "${_keys}.tmp.XXXXXX")" || return 1
+  if awk -F'\t' -v n="$enc_name" '!( $1 == "v1" && $2 == n )' "$_keys" > "$tmp"; then
+    if mv -- "$tmp" "$_keys"; then
+      chmod 600 "$_keys" 2>/dev/null || true
+      [[ -s "$_keys" ]] || rm -f -- "$_keys"    # empty? remove entirely
+      return 0
+    fi
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+
 # --- locking ---
 _lock_trash() {
   exec 9>>"$_lock_file"
@@ -107,5 +123,56 @@ _trash() {
   return $rc
 }
 
+# --- rmx recover <filename> ---
+_recover() {
+  [[ -z "${1:-}" ]] && { echo "  usage: rmx recover <filename>" >&2; return 1; }
+  $_crypto || { echo "  error: no /dev/shm (crypto disabled)" >&2; return 1; }
+  local name="$1" enc_name
+  enc_name="$(_b64enc "$name")"
+  _lock_trash
+
+  [[ ! -f "$_keys" ]] && { _unlock_trash; echo "  error: no keys (rebooted?)" >&2; return 1; }
+  [[ ! -f "$_dir/$name.enc" ]] && { _unlock_trash; echo "  error: '$name' not found" >&2; return 1; }
+
+  # lookup key by base64-encoded name (exact match, last entry wins)
+  local entry key type
+  entry="$(awk -F'\t' -v n="$enc_name" '$1 == "v1" && $2 == n { print $0 }' "$_keys" | tail -1)"
+  key=$(printf '%s' "$entry" | cut -d$'\t' -f3)
+  type=$(printf '%s' "$entry" | cut -d$'\t' -f4)
+  type="${type:-f}"
+
+  [[ -z "$key" ]] && { _unlock_trash; echo "  error: key not found for '$name'" >&2; return 1; }
+  [[ -e "$name" ]] && { _unlock_trash; echo "  error: '$name' already exists in CWD" >&2; return 1; }
+
+  # decrypt and restore
+  if openssl enc -d -aes-256-cbc -pbkdf2 -pass "fd:3" -in "$_dir/$name.enc" -out "$name" 3<<< "$key" 2>/dev/null; then
+    rm -f -- "$_dir/$name.enc" 2>/dev/null || true
+    _drop_key_entry "$enc_name" || { _unlock_trash; echo "  error: key cleanup failed for '$name'" >&2; return 1; }
+    _unlock_trash
+    echo "  recovered: $name"
+  else
+    _unlock_trash
+    echo "  error: decryption failed" >&2
+    return 1
+  fi
+}
+
+# --- rmx list ---
+_list() {
+  $_crypto || { echo "  no /dev/shm (crypto disabled, no recovery)"; return 0; }
+  [[ ! -f "$_keys" ]] && { echo "  no keys (rebooted or empty)"; return 0; }
+  echo "  recoverable (keys in RAM):"
+  local ver b64 key type name
+  while IFS=$'\t' read -r ver b64 key type; do
+    [[ "$ver" == "v1" ]] || continue
+    name="$(printf '%s' "$b64" | base64 -d 2>/dev/null)"
+    printf '    %s\n' "${name:-$b64}"
+  done < "$_keys"
+}
+
 # --- dispatch ---
-_trash "$@"
+case "${1:-}" in
+  recover) shift; _recover "$@" ;;
+  list)    _list ;;
+  *)       _trash "$@" ;;
+esac
