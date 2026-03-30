@@ -83,20 +83,36 @@ _trash_one() {
   if $_crypto; then
     key=$(openssl rand -hex 32 2>/dev/null) || key=""
     if [[ -n "$key" ]]; then
-      # file: encrypt directly
-      if openssl enc -aes-256-cbc -salt -pbkdf2 -pass "fd:3" -in "$f" -out "$_dir/$name.enc" 3<<< "$key" 2>/dev/null; then
-        enc_name="$(_b64enc "$name")"
-        printf 'v1\t%s\t%s\t%s\n' "$enc_name" "$key" "f" >> "$_keys"
-        # symlink: rm only (shred would destroy target)
-        if [[ -L "$f" ]]; then
-          rm -f -- "$f" || { _unlock_trash; return 1; }
-        else
-          shred -u -- "$f" 2>/dev/null || rm -f -- "$f" || { _unlock_trash; return 1; }
+      if [[ -d "$f" ]]; then
+        # directory: tar then encrypt
+        if tar cf - -C "$(dirname -- "$f")" "$(basename -- "$f")" 2>/dev/null \
+          | openssl enc -aes-256-cbc -salt -pbkdf2 -pass "fd:3" -out "$_dir/$name.enc" 3<<< "$key" 2>/dev/null; then
+          enc_name="$(_b64enc "$name")"
+          printf 'v1\t%s\t%s\t%s\n' "$enc_name" "$key" "d" >> "$_keys"
+          if ! rm -rf -- "$f"; then
+            _unlock_trash
+            return 1
+          fi
+          _unlock_trash
+          return 0
         fi
-        _unlock_trash
-        return 0
+        rm -f -- "$_dir/$name.enc" 2>/dev/null || true    # orphan cleanup
+      else
+        # file: encrypt directly
+        if openssl enc -aes-256-cbc -salt -pbkdf2 -pass "fd:3" -in "$f" -out "$_dir/$name.enc" 3<<< "$key" 2>/dev/null; then
+          enc_name="$(_b64enc "$name")"
+          printf 'v1\t%s\t%s\t%s\n' "$enc_name" "$key" "f" >> "$_keys"
+          # symlink: rm only (shred would destroy target)
+          if [[ -L "$f" ]]; then
+            rm -f -- "$f" || { _unlock_trash; return 1; }
+          else
+            shred -u -- "$f" 2>/dev/null || rm -f -- "$f" || { _unlock_trash; return 1; }
+          fi
+          _unlock_trash
+          return 0
+        fi
+        rm -f -- "$_dir/$name.enc" 2>/dev/null || true    # orphan cleanup
       fi
-      rm -f -- "$_dir/$name.enc" 2>/dev/null || true    # orphan cleanup
     fi
   fi
 
@@ -144,16 +160,29 @@ _recover() {
   [[ -z "$key" ]] && { _unlock_trash; echo "  error: key not found for '$name'" >&2; return 1; }
   [[ -e "$name" ]] && { _unlock_trash; echo "  error: '$name' already exists in CWD" >&2; return 1; }
 
-  # decrypt and restore
-  if openssl enc -d -aes-256-cbc -pbkdf2 -pass "fd:3" -in "$_dir/$name.enc" -out "$name" 3<<< "$key" 2>/dev/null; then
-    rm -f -- "$_dir/$name.enc" 2>/dev/null || true
-    _drop_key_entry "$enc_name" || { _unlock_trash; echo "  error: key cleanup failed for '$name'" >&2; return 1; }
-    _unlock_trash
-    echo "  recovered: $name"
+  # decrypt, then cleanup .enc + key entry (restore + cleanup semantics)
+  if [[ "$type" == "d" ]]; then
+    if openssl enc -d -aes-256-cbc -pbkdf2 -pass "fd:3" -in "$_dir/$name.enc" 3<<< "$key" 2>/dev/null | tar xf -; then
+      rm -f -- "$_dir/$name.enc" 2>/dev/null || true
+      _drop_key_entry "$enc_name" || { _unlock_trash; echo "  error: key cleanup failed for '$name'" >&2; return 1; }
+      _unlock_trash
+      echo "  recovered: $name/"
+    else
+      _unlock_trash
+      echo "  error: decryption failed" >&2
+      return 1
+    fi
   else
-    _unlock_trash
-    echo "  error: decryption failed" >&2
-    return 1
+    if openssl enc -d -aes-256-cbc -pbkdf2 -pass "fd:3" -in "$_dir/$name.enc" -out "$name" 3<<< "$key" 2>/dev/null; then
+      rm -f -- "$_dir/$name.enc" 2>/dev/null || true
+      _drop_key_entry "$enc_name" || { _unlock_trash; echo "  error: key cleanup failed for '$name'" >&2; return 1; }
+      _unlock_trash
+      echo "  recovered: $name"
+    else
+      _unlock_trash
+      echo "  error: decryption failed" >&2
+      return 1
+    fi
   fi
 }
 
