@@ -199,9 +199,36 @@ _list() {
   done < "$_keys"
 }
 
+# --- rmx empty ---
+_empty() {
+  mkdir -p "$_dir"
+  _lock_trash
+  if [[ -z "$(ls -A "$_dir" 2>/dev/null)" ]]; then
+    _unlock_trash
+    echo "  rmx is already empty"
+    return 0
+  fi
+  du -sh "$_dir"
+  printf "  permanently delete all? [y/N] "
+  read -r answer
+  [[ "$answer" =~ ^[Yy]$ ]] || { _unlock_trash; echo "  cancelled"; return 0; }
+
+  # destroy keys file (one 32-byte key per encrypted item)
+  if $_crypto && [[ -f "$_keys" ]]; then
+    shred -u "$_keys" 2>/dev/null || rm -f "$_keys"
+  fi
+  # remove all items (find handles dotfiles, * glob does not)
+  find "${_dir:?}" -mindepth 1 -delete
+  # wipe thumbnail cache
+  rm -rf "${HOME}/.cache/thumbnails/"* 2>/dev/null || true
+  _unlock_trash
+  echo "  emptied (crypto-shredded)"
+}
+
 # --- dispatch ---
 case "${1:-}" in
   recover) shift; _recover "$@" ;;
   list)    _list ;;
+  empty)   _empty ;;
   *)       _trash "$@" ;;
 esac

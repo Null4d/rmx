@@ -16,12 +16,14 @@ cp rmx ~/.local/bin/
 rmx <file ...>              # encrypt and trash
 rmx recover <filename>      # decrypt and restore to CWD
 rmx list                    # show recoverable files
+rmx empty                   # destroy all keys + trash
 ```
 
 ## How it works
 
 - `rmx file.txt` encrypts with AES-256-CBC, stores key in `/dev/shm` (RAM)
 - Reboot = keys gone = encrypted files are noise
+- `rmx empty` shreds the key file (32 bytes) then deletes trash
 - No `/dev/shm`? Falls back to plain `mv` (no encryption)
 
 ## Dependencies
