@@ -2,11 +2,11 @@
 # Null · rmx (crypto-shredding)
 # encrypt on delete, key cleanup on recover/empty
 
-set -euo pipefail
+set -euo pipefail # Be carefull
 
-_dir="$HOME/.local/share/Trash"
+_dir="$HOME/.local/share/Trash" # Shows Trash Location
 _crypto=true
-_lock_file="${XDG_RUNTIME_DIR:-/tmp}/trash-lock-$(id -u).flock"
+_lock_file="${XDG_RUNTIME_DIR:-/tmp}/trash-lock-$(id -u).flock" # Wait for your turn
 
 # when /dev/shm is usable, keys live in RAM (reboot => keys gone)
 if [[ -d /dev/shm && -w /dev/shm ]]; then
@@ -15,15 +15,15 @@ else
   _crypto=false
 fi
 
-# --- dependencies ---
-command -v flock >/dev/null 2>&1 || { echo "  error: flock not found" >&2; exit 1; }
+# --- dependencies (fail-fast) ---
+command -v flock >/dev/null 2>&1 || { echo "  error: flock not found" >&2; exit 1; } # Everything installed?
 if $_crypto; then
   command -v base64 >/dev/null 2>&1 || { echo "  error: base64 not found" >&2; exit 1; }
   command -v openssl >/dev/null 2>&1 || { echo "  error: openssl not found" >&2; exit 1; }
 fi
 
 # --- init ---
-_init() {
+_init() { # checking everything
   mkdir -p "$_dir"
   if $_crypto; then
     # keys file unwritable? degrade to plain mv
@@ -68,7 +68,7 @@ _unlock_trash() {
 
 # --- encrypt and remove single item ---
 _trash_one() {
-  local f="$1" base name n key enc_name
+  local f="$1" base name n key enc_name # Only 1 file
 
   _lock_trash
   base="$(basename -- "$f")"
@@ -84,7 +84,7 @@ _trash_one() {
     key=$(openssl rand -hex 32 2>/dev/null) || key=""
     if [[ -n "$key" ]]; then
       if [[ -d "$f" ]]; then
-        # directory: tar then encrypt
+        # directory: tar then encrypt (fd:3 keeps key out of /proc/PID/cmdline)
         if tar cf - -C "$(dirname -- "$f")" "$(basename -- "$f")" 2>/dev/null \
           | openssl enc -aes-256-cbc -salt -pbkdf2 -pass "fd:3" -out "$_dir/$name.enc" 3<<< "$key" 2>/dev/null; then
           enc_name="$(_b64enc "$name")"
@@ -126,7 +126,7 @@ _trash_one() {
   return 1
 }
 
-# --- move multiple files ---
+# --- Delete multiple filees ---
 _trash() {
   [[ $# -eq 0 ]] && { echo "  usage: rmx <file ...>" >&2; return 1; }
   _init
@@ -147,7 +147,7 @@ _recover() {
   enc_name="$(_b64enc "$name")"
   _lock_trash
 
-  [[ ! -f "$_keys" ]] && { _unlock_trash; echo "  error: no keys (rebooted?)" >&2; return 1; }
+  [[ ! -f "$_keys" ]] && { _unlock_trash; echo "  error: no keys (rebooted?)" >&2; return 1; } # checking key file
   [[ ! -f "$_dir/$name.enc" ]] && { _unlock_trash; echo "  error: '$name' not found" >&2; return 1; }
 
   # lookup key by base64-encoded name (exact match, last entry wins)
@@ -230,5 +230,11 @@ case "${1:-}" in
   recover) shift; _recover "$@" ;;
   list)    _list ;;
   empty)   _empty ;;
+  -h|--help)
+    echo "usage: rmx <file ...>"
+    echo "       rmx recover <filename>"
+    echo "       rmx list"
+    echo "       rmx empty"
+    ;;
   *)       _trash "$@" ;;
 esac
